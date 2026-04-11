@@ -217,29 +217,28 @@ def whop_webhook():
     if not data:
         return jsonify({"error": "invalid JSON"}), 400
 
-    event_type   = data.get("event", "")
-    membership   = data.get("data", {})
-    user_obj     = membership.get("user", {})
-    whop_user_id = str(user_obj.get("id") or membership.get("user_id") or "")
-    email        = (user_obj.get("email") or membership.get("email") or "").strip().lower()
-    plan_id      = membership.get("plan_id") or membership.get("product_id") or ""
+    # Whop payload: { "type": "payment.succeeded", "data": { "user": {...}, "plan": {...} } }
+    event_type   = data.get("type", "").strip()
+    payload_data = data.get("data", {})
+    user_obj     = payload_data.get("user", {})
+    whop_user_id = str(user_obj.get("id") or "")
+    email        = (user_obj.get("email") or "").strip().lower()
+    plan_id      = (payload_data.get("plan") or {}).get("id") or (payload_data.get("product") or {}).get("id") or ""
 
-    logger.info(f"Whop event: {event_type} | user={whop_user_id} email={email}")
+    logger.info(f"Whop event: '{event_type}' | user={whop_user_id} email={email}")
 
     if not whop_user_id and not email:
         logger.warning("Webhook missing user identity — ignored")
         return jsonify({"warning": "no user identity"}), 200
 
-    ACTIVE   = {"membership.went_valid", "payment.succeeded", "membership.created"}
-    INACTIVE = {"membership.went_invalid", "membership.cancelled"}
-    EXPIRED  = {"membership.expired"}
+    # Exact Whop event names from docs.whop.com
+    ACTIVE   = {"payment.succeeded", "membership.activated"}
+    INACTIVE = {"membership.deactivated", "membership.cancelled"}
 
     if event_type in ACTIVE:
         upsert_license(whop_user_id, email, plan_id, "active")
     elif event_type in INACTIVE:
         upsert_license(whop_user_id, email, plan_id, "cancelled")
-    elif event_type in EXPIRED:
-        upsert_license(whop_user_id, email, plan_id, "expired")
     else:
         logger.info(f"Unhandled event '{event_type}' — ignored")
 
