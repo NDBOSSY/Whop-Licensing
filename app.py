@@ -129,20 +129,47 @@ safe_init_db()
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def verify_whop_signature(payload_bytes: bytes, sig_header: str) -> bool:
-    """Verify HMAC-SHA256 signature Whop attaches to every webhook."""
+def verify_whop_signature(payload_bytes: bytes, headers: dict) -> bool:
+    """
+    Whop follows the Standard Webhooks spec.
+    Signed content = "{webhook-id}.{webhook-timestamp}.{body}"
+    Signature header = "v1,<base64-hmac-sha256>"
+    """
     if not WHOP_WEBHOOK_SECRET:
-        logger.warning("WHOP_WEBHOOK_SECRET not set — skipping signature check (set it!)")
+        logger.warning("WHOP_WEBHOOK_SECRET not set — skipping signature check")
         return True
-    if not sig_header:
+
+    import base64
+    msg_id        = headers.get("webhook-id", "")
+    msg_timestamp = headers.get("webhook-timestamp", "")
+    sig_header    = headers.get("webhook-signature", "")
+
+    if not msg_id or not msg_timestamp or not sig_header:
+        logger.warning("Missing Standard Webhooks headers")
         return False
-    expected = hmac.new(
-        WHOP_WEBHOOK_SECRET.encode(),
-        payload_bytes,
-        hashlib.sha256,
-    ).hexdigest()
-    received = sig_header.replace("sha256=", "")
-    return hmac.compare_digest(expected, received)
+
+    signed_content = f"{msg_id}.{msg_timestamp}.{payload_bytes.decode('utf-8')}"
+
+    # Whop secret format: ws_<hex> — strip prefix and hex-decode
+    try:
+        raw_secret = WHOP_WEBHOOK_SECRET
+        if raw_secret.startswith("ws_"):
+            raw_secret = raw_secret[3:]
+        secret_bytes = bytes.fromhex(raw_secret)
+    except Exception:
+        secret_bytes = WHOP_WEBHOOK_SECRET.encode()
+
+    expected = base64.b64encode(
+        hmac.new(secret_bytes, signed_content.encode(), hashlib.sha256).digest()
+    ).decode()
+
+    # Header may contain multiple sigs: "v1,abc v1,xyz"
+    for sig in sig_header.split(" "):
+        parts = sig.split(",", 1)
+        if len(parts) == 2 and hmac.compare_digest(parts[1], expected):
+            return True
+
+    return False
 
 
 def upsert_license(whop_user_id: str, email: str, plan_id: str, status: str):
@@ -216,9 +243,8 @@ def whop_webhook():
       membership.expired
     """
     payload_bytes = request.get_data()
-    sig_header    = request.headers.get("X-Whop-Signature", "")
 
-    if not verify_whop_signature(payload_bytes, sig_header):
+    if not verify_whop_signature(payload_bytes, dict(request.headers)):
         logger.warning("Webhook rejected — bad signature")
         return jsonify({"error": "invalid signature"}), 401
 
